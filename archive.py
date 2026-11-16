@@ -1,6 +1,6 @@
-import sqlite3
 from rational import dumps
-from vendor import spline1
+from vendor import poly2
+from convert import convert_legacy, parse_legacy
 
 SCHEMA = """
 CREATE TABLE meta(version INTEGER NOT NULL);
@@ -13,22 +13,35 @@ CREATE TABLE jobs1(name TEXT PRIMARY KEY, curve_id TEXT NOT NULL,
 def create(db):
     db.executescript(SCHEMA)
 
+def version(db):
+    return db.execute("SELECT version FROM meta").fetchone()[0]
+
 class Store:
     def __init__(self, db):
         self.db = db
 
     def replace(self, curve_id, payload):
-        raw = dumps(payload)
-        spline1.load(raw)
-        with self.db:
-            self.db.execute("INSERT INTO curves1 VALUES(?,?) ON CONFLICT(id) "
-                            "DO UPDATE SET payload=excluded.payload", (curve_id, raw))
+        if version(self.db) == 1:
+            raw = dumps(payload)
+            parse_legacy(raw)
+            with self.db:
+                self.db.execute("INSERT INTO curves1 VALUES(?,?) ON CONFLICT(id) "
+                                "DO UPDATE SET payload=excluded.payload", (curve_id, raw))
+        else:
+            target = convert_legacy(payload)
+            with self.db:
+                poly2.replace(self.db, curve_id, target)
 
     def value(self, curve_id, x):
-        row = self.db.execute("SELECT payload FROM curves1 WHERE id=?", (curve_id,)).fetchone()
-        if row is None:
-            raise KeyError(curve_id)
-        return spline1.value(spline1.load(row[0]), x)
+        if version(self.db) == 1:
+            row = self.db.execute("SELECT payload FROM curves1 WHERE id=?",
+                                  (curve_id,)).fetchone()
+            if row is None:
+                raise KeyError(curve_id)
+            payload = convert_legacy(row[0])
+        else:
+            payload = poly2.read(self.db, curve_id)
+        return poly2.value(payload, x)
 
 def atomic_upgrade(db, populate, before_commit=lambda: None):
     """Provided transaction facility, not a converter. No active caller transaction."""
